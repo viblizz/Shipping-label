@@ -362,215 +362,210 @@
 
     <div class="summary-dashboard no-print" id="summary-dashboard" style="display: none;">
         <div class="summary-card">
-            <div class="summary-title">📈 Batch Printing Summary Overview</div>
-            <div class="summary-grid" id="summary-grid">
-                </div>
+            <div class="summary-title">📈 Batch Printing Summary Overview (Cloud Sync)</div>
+            <div class="summary-grid" id="summary-grid"></div>
         </div>
     </div>
 
     <div class="saved-files-panel no-print">
         <div class="saved-files-header">
-            <span>📂 Saved File History (Local Browser Storage)</span>
+            <span>📂 Saved File History (Firebase Cloud Storage)</span>
             <div class="search-box">
                 <input type="text" id="order-search-input" placeholder="🔍 Search Order ID (e.g. 405-1234567...)">
                 <button class="btn btn-blue btn-small" onclick="searchForOrder()">Locate File</button>
             </div>
         </div>
         <div id="search-result"></div>
-        <div class="history-list" id="history-list">
-            </div>
+        <div class="history-list" id="history-list"></div>
     </div>
 
     <div id="labels-container"></div>
 
-    <script>
+    <script type="module">
+        // Import Firebase modules
+        import { initializeApp } from "https://www.gstatic.com/firebasejs/10.12.2/firebase-app.js";
+        import { getFirestore, collection, addDoc, getDocs, doc, updateDoc, deleteDoc, getDoc } from "https://www.gstatic.com/firebasejs/10.12.2/firebase-firestore.js";
+        import { getStorage, ref, uploadBytes, getDownloadURL, deleteObject, getBlob } from "https://www.gstatic.com/firebasejs/10.12.2/firebase-storage.js";
+
+        // Your web app's Firebase configuration
+        const firebaseConfig = {
+            apiKey: "AIzaSyDn1TaEeXbCEDjXAusqZ5R1i5H7oBqwCSM",
+            authDomain: "shipping-label-b9560.firebaseapp.com",
+            projectId: "shipping-label-b9560",
+            storageBucket: "shipping-label-b9560.firebasestorage.app",
+            messagingSenderId: "93789744815",
+            appId: "1:93789744815:web:19e4818bf002c24c73ae5a"
+        };
+
+        // Initialize Firebase
+        const app = initializeApp(firebaseConfig);
+        const db = getFirestore(app);
+        const storage = getStorage(app);
+
         pdfjsLib.GlobalWorkerOptions.workerSrc = 'https://cdnjs.cloudflare.com/ajax/libs/pdf.js/2.16.105/pdf.worker.min.js';
 
         // --- GLOBAL VARIABLES ---
         let processedOrders = [];
         let currentPdfDoc = null;
-        let db; // IndexedDB Database reference
         let temporaryExtractedCompany = "Unknown Seller";
-        let currentActiveFileName = "Amazon_Labels.pdf"; // Tracks the filename for downloading
+        let currentActiveFileName = "Amazon_Labels.pdf"; 
 
         // --- EVENT LISTENERS ---
         document.getElementById('pdf-file').addEventListener('change', handleNewUpload);
         document.getElementById('sort-strategy').addEventListener('change', renderSortedLabels);
-        
-        // Add Enter key support for search
         document.getElementById('order-search-input').addEventListener('keypress', function(e) {
             if (e.key === 'Enter') searchForOrder();
         });
 
-        // --- INDEXEDDB SETUP FOR LOCAL STORAGE ---
+        // --- FIREBASE CLOUD STORAGE FUNCTIONS ---
+        
         function initDB() {
-            const request = indexedDB.open('AmazonLabelDB', 3); // Incremented version for new structure
-            
-            request.onupgradeneeded = (event) => {
-                db = event.target.result;
-                if (!db.objectStoreNames.contains('pdfs')) {
-                    db.createObjectStore('pdfs', { keyPath: 'id' });
-                }
-            };
-
-            request.onsuccess = (event) => {
-                db = event.target.result;
-                loadHistoryUI();
-            };
-
-            request.onerror = (event) => {
-                console.error('IndexedDB error:', event.target.error);
-            };
+            // Replaced IndexedDB initialization with direct fetch from Firestore
+            loadHistoryUI();
         }
 
-        // Updated to save the array of processed order IDs so we can search them later
-        function saveFileToStorage(file, companyName = "Unknown Seller", processedDataArray = []) {
-            const transaction = db.transaction(['pdfs'], 'readwrite');
-            const store = transaction.objectStore('pdfs');
-            
-            const fileData = {
-                id: Date.now(),
-                name: file.name,
-                blob: file,
-                companyName: companyName,
-                isPrinted: false,
-                date: new Date().toLocaleString(),
-                extractedOrderIds: processedDataArray.map(o => o.orderId).filter(id => id !== "Unknown")
-            };
-
-            store.add(fileData);
-            transaction.oncomplete = () => loadHistoryUI();
-        }
-
-        function togglePrintedStatus(id, isChecked) {
-            const transaction = db.transaction(['pdfs'], 'readwrite');
-            const store = transaction.objectStore('pdfs');
-            const request = store.get(id);
-
-            request.onsuccess = () => {
-                const data = request.result;
-                if (data) {
-                    data.isPrinted = isChecked;
-                    store.put(data);
-                }
-            };
-            
-            transaction.oncomplete = () => {
-                loadHistoryUI();
-            };
-        }
-
-        function deleteFileFromStorage(id) {
-            const transaction = db.transaction(['pdfs'], 'readwrite');
-            const store = transaction.objectStore('pdfs');
-            store.delete(id);
-            transaction.oncomplete = () => loadHistoryUI();
-        }
-
-        // --- NEW FEATURE: Download Original File ---
-        function downloadOriginalFile(id) {
-            const transaction = db.transaction(['pdfs'], 'readonly');
-            const store = transaction.objectStore('pdfs');
-            const request = store.get(id);
-
-            request.onsuccess = () => {
-                const fileData = request.result;
-                if (!fileData || !fileData.blob) return;
+        async function saveFileToStorage(file, companyName = "Unknown Seller", processedDataArray = []) {
+            try {
+                const fileId = Date.now().toString();
+                const storagePath = `pdfs/${fileId}_${file.name}`;
+                const storageRef = ref(storage, storagePath);
                 
-                const url = URL.createObjectURL(fileData.blob);
-                const a = document.createElement('a');
-                a.href = url;
-                a.download = fileData.name;
-                document.body.appendChild(a);
-                a.click();
-                document.body.removeChild(a);
-                URL.revokeObjectURL(url);
-            };
+                // Upload PDF to Firebase Storage
+                await uploadBytes(storageRef, file);
+                const downloadURL = await getDownloadURL(storageRef);
+
+                // Save Metadata to Firestore
+                await addDoc(collection(db, "pdfs"), {
+                    name: file.name,
+                    companyName: companyName,
+                    isPrinted: false,
+                    date: new Date().toLocaleString(),
+                    createdAt: Date.now(),
+                    extractedOrderIds: processedDataArray.map(o => o.orderId).filter(id => id !== "Unknown"),
+                    fileUrl: downloadURL,
+                    storagePath: storagePath
+                });
+
+                loadHistoryUI();
+            } catch (error) {
+                console.error("Error saving to Firebase:", error);
+                alert("Failed to sync file to cloud.");
+            }
         }
 
-        // --- NEW FEATURE: Search Order ID ---
-        function searchForOrder() {
-            const query = document.getElementById('order-search-input').value.trim();
+        async function togglePrintedStatus(id, isChecked) {
+            const docRef = doc(db, "pdfs", id);
+            await updateDoc(docRef, { isPrinted: isChecked });
+            loadHistoryUI();
+        }
+
+        async function deleteFileFromStorage(id) {
+            const docRef = doc(db, "pdfs", id);
+            const docSnap = await getDoc(docRef);
+            
+            if(docSnap.exists()) {
+                const data = docSnap.data();
+                if (data.storagePath) {
+                    const storageRef = ref(storage, data.storagePath);
+                    // Delete from Storage Bucket
+                    await deleteObject(storageRef).catch(e => console.log("Storage cleanup error:", e));
+                }
+            }
+            // Delete from Database
+            await deleteDoc(docRef);
+            loadHistoryUI();
+        }
+
+        async function downloadOriginalFile(id) {
+            const docRef = doc(db, "pdfs", id);
+            const docSnap = await getDoc(docRef);
+            
+            if(docSnap.exists() && docSnap.data().fileUrl) {
+                window.open(docSnap.data().fileUrl, '_blank');
+            }
+        }
+
+        async function searchForOrder() {
+            const queryText = document.getElementById('order-search-input').value.trim();
             const resultEl = document.getElementById('search-result');
             
-            if(!query) { 
+            if(!queryText) { 
                 resultEl.innerHTML = ""; 
                 return; 
             }
             
-            const transaction = db.transaction(['pdfs'], 'readonly');
-            const store = transaction.objectStore('pdfs');
-            const request = store.getAll();
+            const querySnapshot = await getDocs(collection(db, "pdfs"));
+            let foundFiles = [];
             
-            request.onsuccess = () => {
-                const files = request.result;
-                let foundFiles = [];
-                
-                files.forEach(f => {
-                    // Check if the orderId exists in the stored array for this file
-                    if(f.extractedOrderIds && f.extractedOrderIds.includes(query)) {
-                        foundFiles.push(f.name);
-                    }
-                });
-                
-                if(foundFiles.length > 0) {
-                    resultEl.style.color = "#28a745"; // Green success
-                    resultEl.innerHTML = `✅ Found in: <strong>${foundFiles.join(', ')}</strong>. You can hit 'Rearrange & Print' on that file below.`;
-                } else {
-                    resultEl.style.color = "#dc3545"; // Red error
-                    resultEl.innerHTML = `❌ Order ID not found. Ensure you typed it correctly or that the file was uploaded recently.`;
+            querySnapshot.forEach(docSnap => {
+                const f = docSnap.data();
+                if(f.extractedOrderIds && f.extractedOrderIds.includes(queryText)) {
+                    foundFiles.push(f.name);
                 }
-            };
+            });
+            
+            if(foundFiles.length > 0) {
+                resultEl.style.color = "#28a745"; 
+                resultEl.innerHTML = `✅ Found in: <strong>${foundFiles.join(', ')}</strong>. You can hit 'Rearrange & Print' below.`;
+            } else {
+                resultEl.style.color = "#dc3545"; 
+                resultEl.innerHTML = `❌ Order ID not found in the cloud database.`;
+            }
         }
 
-        function loadHistoryUI() {
-            const transaction = db.transaction(['pdfs'], 'readonly');
-            const store = transaction.objectStore('pdfs');
-            const request = store.getAll();
+        async function loadHistoryUI() {
+            const historyList = document.getElementById('history-list');
+            historyList.innerHTML = 'Loading cloud data...';
+            
+            const querySnapshot = await getDocs(collection(db, "pdfs"));
+            let files = [];
+            
+            querySnapshot.forEach((docSnap) => {
+                files.push({ id: docSnap.id, ...docSnap.data() });
+            });
 
-            request.onsuccess = () => {
-                const historyList = document.getElementById('history-list');
-                historyList.innerHTML = '';
+            // Sort newest first
+            files.sort((a, b) => b.createdAt - a.createdAt);
+
+            historyList.innerHTML = '';
+
+            if (files.length === 0) {
+                historyList.innerHTML = '<div style="font-size: 14px; color: #777;">No previous files saved in the cloud.</div>';
+                document.getElementById('summary-dashboard').style.display = 'none';
+                return;
+            }
+
+            calculateSummaryDashboard(files);
+
+            files.forEach(fileData => {
+                const item = document.createElement('div');
+                item.className = `history-item ${fileData.isPrinted ? 'printed-row' : ''}`;
                 
-                const files = request.result.reverse(); 
+                const displayCompany = fileData.companyName || "Unknown Seller";
+                const checkedAttribute = fileData.isPrinted ? "checked" : "";
 
-                if (files.length === 0) {
-                    historyList.innerHTML = '<div style="font-size: 14px; color: #777;">No previous files saved.</div>';
-                    document.getElementById('summary-dashboard').style.display = 'none';
-                    return;
-                }
-
-                calculateSummaryDashboard(files);
-
-                files.forEach(fileData => {
-                    const item = document.createElement('div');
-                    item.className = `history-item ${fileData.isPrinted ? 'printed-row' : ''}`;
-                    
-                    const displayCompany = fileData.companyName || "Unknown Seller";
-                    const checkedAttribute = fileData.isPrinted ? "checked" : "";
-
-                    item.innerHTML = `
-                        <div class="history-info">
-                            <span class="history-name">${fileData.name}</span>
-                            <div class="history-meta-row">
-                                <span class="company-badge">🏢 ${displayCompany}</span>
-                                <span class="history-date">${fileData.date}</span>
-                            </div>
+                // Note: fileData.id is now a string, so quotes are required in the onclick handlers
+                item.innerHTML = `
+                    <div class="history-info">
+                        <span class="history-name">${fileData.name}</span>
+                        <div class="history-meta-row">
+                            <span class="company-badge">🏢 ${displayCompany}</span>
+                            <span class="history-date">${fileData.date}</span>
                         </div>
-                        <div class="history-actions">
-                            <label class="print-status-wrapper">
-                                <input type="checkbox" ${checkedAttribute} onchange="togglePrintedStatus(${fileData.id}, this.checked)">
-                                Done Printing
-                            </label>
-                            <button class="btn btn-grey btn-small" onclick="downloadOriginalFile(${fileData.id})">⬇️ Original PDF</button>
-                            <button class="btn btn-secondary btn-small" onclick="processStoredFile(${fileData.id}, 'print')">Rearrange & Print</button>
-                            <button class="btn btn-blue btn-small" onclick="processStoredFile(${fileData.id}, 'download')">Rearrange & Download</button>
-                            <button class="btn btn-red btn-small" onclick="deleteFileFromStorage(${fileData.id})">Delete</button>
-                        </div>
-                    `;
-                    historyList.appendChild(item);
-                });
-            };
+                    </div>
+                    <div class="history-actions">
+                        <label class="print-status-wrapper">
+                            <input type="checkbox" ${checkedAttribute} onchange="togglePrintedStatus('${fileData.id}', this.checked)">
+                            Done Printing
+                        </label>
+                        <button class="btn btn-grey btn-small" onclick="downloadOriginalFile('${fileData.id}')">⬇️ Original PDF</button>
+                        <button class="btn btn-secondary btn-small" onclick="processStoredFile('${fileData.id}', 'print')">Rearrange & Print</button>
+                        <button class="btn btn-blue btn-small" onclick="processStoredFile('${fileData.id}', 'download')">Rearrange & Download</button>
+                        <button class="btn btn-red btn-small" onclick="deleteFileFromStorage('${fileData.id}')">Delete</button>
+                    </div>
+                `;
+                historyList.appendChild(item);
+            });
         }
 
         function calculateSummaryDashboard(files) {
@@ -596,7 +591,7 @@
 
             dashboard.style.display = 'block';
             grid.innerHTML = `
-                <div class="summary-stat">Total Uploaded Files: <span>${totalBatches}</span></div>
+                <div class="summary-stat">Total Cloud Files: <span>${totalBatches}</span></div>
                 <div class="summary-stat">Completed Prints: <span>${totalPrinted} / ${totalBatches}</span></div>
             `;
 
@@ -615,39 +610,44 @@
             const file = e.target.files[0];
             if (!file) return;
             
-            // Set global filename tracker
             currentActiveFileName = file.name;
-            
             await runCoreEngine(file);
-            // Pass the extracted processedOrders so it saves Order IDs to the DB
-            saveFileToStorage(file, temporaryExtractedCompany, processedOrders); 
+            await saveFileToStorage(file, temporaryExtractedCompany, processedOrders); 
         }
 
-        function processStoredFile(id, action) {
-            const transaction = db.transaction(['pdfs'], 'readonly');
-            const store = transaction.objectStore('pdfs');
-            const request = store.get(id);
+        async function processStoredFile(id, action) {
+            const statusEl = document.getElementById('status');
+            statusEl.textContent = "Fetching file from Firebase Storage...";
+            
+            const docRef = doc(db, "pdfs", id);
+            const docSnap = await getDoc(docRef);
 
-            request.onsuccess = async () => {
-                const fileData = request.result;
-                if (!fileData) return;
+            if(docSnap.exists()) {
+                const data = docSnap.data();
+                currentActiveFileName = data.name;
                 
-                // Set global filename tracker
-                currentActiveFileName = fileData.name;
-                
-                await runCoreEngine(fileData.blob);
-                
-                setTimeout(() => {
-                    if (action === 'print') {
-                        window.print();
-                    } else if (action === 'download') {
-                        downloadCurrentLabels();
-                    }
-                }, 1000); 
-            };
+                try {
+                    // Fetch blob directly from Firebase Storage to avoid CORS issues
+                    const storageRef = ref(storage, data.storagePath);
+                    const blob = await getBlob(storageRef);
+                    
+                    await runCoreEngine(blob);
+                    
+                    setTimeout(() => {
+                        if (action === 'print') {
+                            window.print();
+                        } else if (action === 'download') {
+                            downloadCurrentLabels();
+                        }
+                    }, 1000); 
+                } catch (error) {
+                    console.error("Error fetching file:", error);
+                    statusEl.textContent = "Error: Could not retrieve file from cloud.";
+                }
+            }
         }
 
-        // --- NEW FEATURE: Dynamic Filenames ---
+        // --- PDF GENERATION & ENGINE CODE (UNCHANGED) ---
         async function downloadCurrentLabels() {
             const { jsPDF } = window.jspdf;
             const canvases = document.querySelectorAll('#labels-container canvas');
@@ -678,10 +678,8 @@
                     pdf.addImage(imgData, 'JPEG', 0, 0, canvases[i].width, canvases[i].height);
                 }
 
-                // Remove .pdf extension and add _rearranged.pdf
                 let dynamicName = currentActiveFileName.replace(/\.[^/.]+$/, "") + "_rearranged.pdf";
                 pdf.save(dynamicName);
-                
                 statusEl.textContent = "Download complete!";
             } catch (err) {
                 console.error(err);
@@ -689,9 +687,6 @@
             }
         }
 
-        // ==============================================================================
-        // --- MAIN ENGINE CODE (UPDATED FOR DYNAMIC MULTI-PAGE INVOICE MAPPING) ---
-        // ==============================================================================
         async function runCoreEngine(file) {
             const statusEl = document.getElementById('status');
             const container = document.getElementById('labels-container');
@@ -711,12 +706,10 @@
                 let groupedOrders = [];
                 let currentGroup = { labelPageNum: null, labelTextData: null, invoicePages: [] };
 
-                // 1. Sequentially group pages (1 Image Label -> N Text Invoices)
                 for (let i = 1; i <= currentPdfDoc.numPages; i++) {
                     const page = await currentPdfDoc.getPage(i);
                     const textData = await extractTextAndPositions(page);
                     
-                    // Identify invoices based on text volume and key Amazon phrases
                     const isInvoice = /Sold By|Tax Invoice|HSN|Invoice Number/i.test(textData.text) || textData.text.length > 150;
 
                     if (!isInvoice) {
@@ -733,7 +726,6 @@
                     groupedOrders.push(currentGroup);
                 }
 
-                // 2. Extract Data from the Clickable Invoices and link to the Image Label
                 for (const group of groupedOrders) {
                     if (group.labelPageNum === null) continue;
 
@@ -774,10 +766,8 @@
                             }
                         }
 
-                        // --- CHUNKING EXTRACTION USING INDIAN RUPEE (₹) PATTERN ---
                         let skus = [];
                         let qtys = [];
-
                         const skuRegex = /\(([^)]+)\)\s*HSN/gi;
                         let skuMatch;
                         
@@ -936,27 +926,16 @@
             }
         }
 
+        // Expose UI functions to the global window so HTML buttons can trigger them
+        window.searchForOrder = searchForOrder;
+        window.togglePrintedStatus = togglePrintedStatus;
+        window.deleteFileFromStorage = deleteFileFromStorage;
+        window.downloadOriginalFile = downloadOriginalFile;
+        window.processStoredFile = processStoredFile;
+        window.downloadCurrentLabels = downloadCurrentLabels;
+
+        // Boot up
         initDB();
-    </script>
-    
-    <script type="module">
-      // Import the functions you need from the SDKs you need
-      import { initializeApp } from "https://www.gstatic.com/firebasejs/12.14.0/firebase-app.js";
-      // TODO: Add SDKs for Firebase products that you want to use
-      // https://firebase.google.com/docs/web/setup#available-libraries
-
-      // Your web app's Firebase configuration
-      const firebaseConfig = {
-        apiKey: "AIzaSyDn1TaEeXbCEDjXAusqZ5R1i5H7oBqwCSM",
-        authDomain: "shipping-label-b9560.firebaseapp.com",
-        projectId: "shipping-label-b9560",
-        storageBucket: "shipping-label-b9560.firebasestorage.app",
-        messagingSenderId: "93789744815",
-        appId: "1:93789744815:web:19e4818bf002c24c73ae5a"
-      };
-
-      // Initialize Firebase
-      const app = initializeApp(firebaseConfig);
     </script>
 </body>
 </html>
