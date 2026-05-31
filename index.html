@@ -355,39 +355,42 @@
             </div>
 
             <button class="btn btn-secondary" id="print-btn" disabled onclick="window.print()">🖨️ Print Labels Only</button>
-            <button class="btn btn-blue" id="download-btn" disabled onclick="downloadCurrentLabels()">⬇️ Download PDF</button>
+            <button class="btn btn-blue" id="download-btn" disabled onclick="window.downloadCurrentLabels()">⬇️ Download PDF</button>
             <div id="status">Waiting for your file...</div>
         </div>
     </div>
 
     <div class="summary-dashboard no-print" id="summary-dashboard" style="display: none;">
         <div class="summary-card">
-            <div class="summary-title">📈 Batch Printing Summary Overview (Cloud Sync)</div>
-            <div class="summary-grid" id="summary-grid"></div>
+            <div class="summary-title">📈 Batch Printing Summary Overview</div>
+            <div class="summary-grid" id="summary-grid">
+                </div>
         </div>
     </div>
 
     <div class="saved-files-panel no-print">
         <div class="saved-files-header">
-            <span>📂 Saved File History (Firebase Cloud Storage)</span>
+            <span>📂 Saved File History (Cloud Storage)</span>
             <div class="search-box">
                 <input type="text" id="order-search-input" placeholder="🔍 Search Order ID (e.g. 405-1234567...)">
-                <button class="btn btn-blue btn-small" onclick="searchForOrder()">Locate File</button>
+                <button class="btn btn-blue btn-small" onclick="window.searchForOrder()">Locate File</button>
             </div>
         </div>
         <div id="search-result"></div>
-        <div class="history-list" id="history-list"></div>
+        <div class="history-list" id="history-list">
+            <div style="font-size: 14px; color: #777;">Loading history from Firebase...</div>
+        </div>
     </div>
 
     <div id="labels-container"></div>
 
     <script type="module">
-        // Import Firebase modules
-        import { initializeApp } from "https://www.gstatic.com/firebasejs/10.12.2/firebase-app.js";
-        import { getFirestore, collection, addDoc, getDocs, doc, updateDoc, deleteDoc, getDoc } from "https://www.gstatic.com/firebasejs/10.12.2/firebase-firestore.js";
-        import { getStorage, ref, uploadBytes, getDownloadURL, deleteObject, getBlob } from "https://www.gstatic.com/firebasejs/10.12.2/firebase-storage.js";
+        // --- FIREBASE IMPORTS ---
+        import { initializeApp } from "https://www.gstatic.com/firebasejs/12.14.0/firebase-app.js";
+        import { getFirestore, collection, doc, setDoc, getDocs, updateDoc, deleteDoc } from "https://www.gstatic.com/firebasejs/12.14.0/firebase-firestore.js";
+        import { getStorage, ref, uploadBytes, getBlob, deleteObject, getDownloadURL } from "https://www.gstatic.com/firebasejs/12.14.0/firebase-storage.js";
 
-        // Your web app's Firebase configuration
+        // --- FIREBASE SETUP ---
         const firebaseConfig = {
             apiKey: "AIzaSyDn1TaEeXbCEDjXAusqZ5R1i5H7oBqwCSM",
             authDomain: "shipping-label-b9560.firebaseapp.com",
@@ -396,12 +399,11 @@
             messagingSenderId: "93789744815",
             appId: "1:93789744815:web:19e4818bf002c24c73ae5a"
         };
-
-        // Initialize Firebase
         const app = initializeApp(firebaseConfig);
         const db = getFirestore(app);
         const storage = getStorage(app);
 
+        // --- PDF.JS SETUP ---
         pdfjsLib.GlobalWorkerOptions.workerSrc = 'https://cdnjs.cloudflare.com/ajax/libs/pdf.js/2.16.105/pdf.worker.min.js';
 
         // --- GLOBAL VARIABLES ---
@@ -413,159 +415,167 @@
         // --- EVENT LISTENERS ---
         document.getElementById('pdf-file').addEventListener('change', handleNewUpload);
         document.getElementById('sort-strategy').addEventListener('change', renderSortedLabels);
+        
         document.getElementById('order-search-input').addEventListener('keypress', function(e) {
-            if (e.key === 'Enter') searchForOrder();
+            if (e.key === 'Enter') window.searchForOrder();
         });
 
-        // --- FIREBASE CLOUD STORAGE FUNCTIONS ---
-        
-        function initDB() {
-            // Replaced IndexedDB initialization with direct fetch from Firestore
-            loadHistoryUI();
-        }
+        // Initialize App
+        loadHistoryUI();
 
+        // --- FIREBASE STORAGE & FIRESTORE LOGIC ---
         async function saveFileToStorage(file, companyName = "Unknown Seller", processedDataArray = []) {
+            document.getElementById('status').textContent = "Saving to Firebase Cloud Storage...";
+            
+            const id = Date.now().toString();
+            const fileData = {
+                id: id,
+                name: file.name,
+                companyName: companyName,
+                isPrinted: false,
+                date: new Date().toLocaleString(),
+                extractedOrderIds: processedDataArray.map(o => o.orderId).filter(id => id !== "Unknown")
+            };
+
             try {
-                const fileId = Date.now().toString();
-                const storagePath = `pdfs/${fileId}_${file.name}`;
-                const storageRef = ref(storage, storagePath);
-                
-                // Upload PDF to Firebase Storage
+                // Upload Blob to Firebase Storage
+                const storageRef = ref(storage, 'pdfs/' + id);
                 await uploadBytes(storageRef, file);
-                const downloadURL = await getDownloadURL(storageRef);
 
-                // Save Metadata to Firestore
-                await addDoc(collection(db, "pdfs"), {
-                    name: file.name,
-                    companyName: companyName,
-                    isPrinted: false,
-                    date: new Date().toLocaleString(),
-                    createdAt: Date.now(),
-                    extractedOrderIds: processedDataArray.map(o => o.orderId).filter(id => id !== "Unknown"),
-                    fileUrl: downloadURL,
-                    storagePath: storagePath
-                });
-
+                // Save MetaData to Firestore
+                await setDoc(doc(db, "pdfs", id), fileData);
+                
+                document.getElementById('status').textContent = "Saved to cloud successfully!";
                 loadHistoryUI();
             } catch (error) {
-                console.error("Error saving to Firebase:", error);
-                alert("Failed to sync file to cloud.");
+                console.error("Firebase save error: ", error);
+                document.getElementById('status').textContent = "Error saving to cloud.";
             }
         }
 
-        async function togglePrintedStatus(id, isChecked) {
-            const docRef = doc(db, "pdfs", id);
-            await updateDoc(docRef, { isPrinted: isChecked });
-            loadHistoryUI();
-        }
-
-        async function deleteFileFromStorage(id) {
-            const docRef = doc(db, "pdfs", id);
-            const docSnap = await getDoc(docRef);
-            
-            if(docSnap.exists()) {
-                const data = docSnap.data();
-                if (data.storagePath) {
-                    const storageRef = ref(storage, data.storagePath);
-                    // Delete from Storage Bucket
-                    await deleteObject(storageRef).catch(e => console.log("Storage cleanup error:", e));
-                }
+        window.togglePrintedStatus = async function(id, isChecked) {
+            try {
+                await updateDoc(doc(db, "pdfs", id), { isPrinted: isChecked });
+                loadHistoryUI();
+            } catch (error) {
+                console.error("Error updating print status:", error);
             }
-            // Delete from Database
-            await deleteDoc(docRef);
-            loadHistoryUI();
-        }
+        };
 
-        async function downloadOriginalFile(id) {
-            const docRef = doc(db, "pdfs", id);
-            const docSnap = await getDoc(docRef);
-            
-            if(docSnap.exists() && docSnap.data().fileUrl) {
-                window.open(docSnap.data().fileUrl, '_blank');
+        window.deleteFileFromStorage = async function(id) {
+            try {
+                // Delete from Storage
+                await deleteObject(ref(storage, 'pdfs/' + id));
+                // Delete from Firestore
+                await deleteDoc(doc(db, "pdfs", id));
+                loadHistoryUI();
+            } catch (error) {
+                console.error("Error deleting file:", error);
             }
-        }
+        };
 
-        async function searchForOrder() {
-            const queryText = document.getElementById('order-search-input').value.trim();
+        window.downloadOriginalFile = async function(id, originalName) {
+            try {
+                const storageRef = ref(storage, 'pdfs/' + id);
+                const url = await getDownloadURL(storageRef);
+                const a = document.createElement('a');
+                a.href = url;
+                a.target = '_blank';
+                a.download = originalName || "Original_Labels.pdf";
+                document.body.appendChild(a);
+                a.click();
+                document.body.removeChild(a);
+            } catch (error) {
+                console.error("Error downloading file:", error);
+                alert("Could not download original file. It may have been removed.");
+            }
+        };
+
+        window.searchForOrder = async function() {
+            const queryTxt = document.getElementById('order-search-input').value.trim();
             const resultEl = document.getElementById('search-result');
             
-            if(!queryText) { 
+            if(!queryTxt) { 
                 resultEl.innerHTML = ""; 
                 return; 
             }
             
-            const querySnapshot = await getDocs(collection(db, "pdfs"));
-            let foundFiles = [];
-            
-            querySnapshot.forEach(docSnap => {
-                const f = docSnap.data();
-                if(f.extractedOrderIds && f.extractedOrderIds.includes(queryText)) {
-                    foundFiles.push(f.name);
+            try {
+                const snapshot = await getDocs(collection(db, "pdfs"));
+                let foundFiles = [];
+                
+                snapshot.forEach(docSnap => {
+                    const f = docSnap.data();
+                    if(f.extractedOrderIds && f.extractedOrderIds.includes(queryTxt)) {
+                        foundFiles.push(f.name);
+                    }
+                });
+                
+                if(foundFiles.length > 0) {
+                    resultEl.style.color = "#28a745"; 
+                    resultEl.innerHTML = `✅ Found in: <strong>${foundFiles.join(', ')}</strong>. You can hit 'Rearrange & Print' on that file below.`;
+                } else {
+                    resultEl.style.color = "#dc3545"; 
+                    resultEl.innerHTML = `❌ Order ID not found. Ensure you typed it correctly or that the file was uploaded recently.`;
                 }
-            });
-            
-            if(foundFiles.length > 0) {
-                resultEl.style.color = "#28a745"; 
-                resultEl.innerHTML = `✅ Found in: <strong>${foundFiles.join(', ')}</strong>. You can hit 'Rearrange & Print' below.`;
-            } else {
-                resultEl.style.color = "#dc3545"; 
-                resultEl.innerHTML = `❌ Order ID not found in the cloud database.`;
+            } catch (error) {
+                console.error("Search error:", error);
             }
-        }
+        };
 
         async function loadHistoryUI() {
-            const historyList = document.getElementById('history-list');
-            historyList.innerHTML = 'Loading cloud data...';
-            
-            const querySnapshot = await getDocs(collection(db, "pdfs"));
-            let files = [];
-            
-            querySnapshot.forEach((docSnap) => {
-                files.push({ id: docSnap.id, ...docSnap.data() });
-            });
+            try {
+                const snapshot = await getDocs(collection(db, "pdfs"));
+                const files = [];
+                snapshot.forEach(docSnap => {
+                    files.push(docSnap.data());
+                });
 
-            // Sort newest first
-            files.sort((a, b) => b.createdAt - a.createdAt);
+                // Sort by ID descending (newest first)
+                files.sort((a, b) => Number(b.id) - Number(a.id));
 
-            historyList.innerHTML = '';
+                const historyList = document.getElementById('history-list');
+                historyList.innerHTML = '';
 
-            if (files.length === 0) {
-                historyList.innerHTML = '<div style="font-size: 14px; color: #777;">No previous files saved in the cloud.</div>';
-                document.getElementById('summary-dashboard').style.display = 'none';
-                return;
-            }
+                if (files.length === 0) {
+                    historyList.innerHTML = '<div style="font-size: 14px; color: #777;">No previous files saved in the cloud.</div>';
+                    document.getElementById('summary-dashboard').style.display = 'none';
+                    return;
+                }
 
-            calculateSummaryDashboard(files);
+                calculateSummaryDashboard(files);
 
-            files.forEach(fileData => {
-                const item = document.createElement('div');
-                item.className = `history-item ${fileData.isPrinted ? 'printed-row' : ''}`;
-                
-                const displayCompany = fileData.companyName || "Unknown Seller";
-                const checkedAttribute = fileData.isPrinted ? "checked" : "";
+                files.forEach(fileData => {
+                    const item = document.createElement('div');
+                    item.className = `history-item ${fileData.isPrinted ? 'printed-row' : ''}`;
+                    
+                    const displayCompany = fileData.companyName || "Unknown Seller";
+                    const checkedAttribute = fileData.isPrinted ? "checked" : "";
 
-                // Note: fileData.id is now a string, so quotes are required in the onclick handlers
-                item.innerHTML = `
-                    <div class="history-info">
-                        <span class="history-name">${fileData.name}</span>
-                        <div class="history-meta-row">
-                            <span class="company-badge">🏢 ${displayCompany}</span>
-                            <span class="history-date">${fileData.date}</span>
+                    item.innerHTML = `
+                        <div class="history-info">
+                            <span class="history-name">${fileData.name}</span>
+                            <div class="history-meta-row">
+                                <span class="company-badge">🏢 ${displayCompany}</span>
+                                <span class="history-date">${fileData.date}</span>
+                            </div>
                         </div>
-                    </div>
-                    <div class="history-actions">
-                        <label class="print-status-wrapper">
-                            <input type="checkbox" ${checkedAttribute} onchange="togglePrintedStatus('${fileData.id}', this.checked)">
-                            Done Printing
-                        </label>
-                        <button class="btn btn-grey btn-small" onclick="downloadOriginalFile('${fileData.id}')">⬇️ Original PDF</button>
-                        <button class="btn btn-secondary btn-small" onclick="processStoredFile('${fileData.id}', 'print')">Rearrange & Print</button>
-                        <button class="btn btn-blue btn-small" onclick="processStoredFile('${fileData.id}', 'download')">Rearrange & Download</button>
-                        <button class="btn btn-red btn-small" onclick="deleteFileFromStorage('${fileData.id}')">Delete</button>
-                    </div>
-                `;
-                historyList.appendChild(item);
-            });
+                        <div class="history-actions">
+                            <label class="print-status-wrapper">
+                                <input type="checkbox" ${checkedAttribute} onchange="window.togglePrintedStatus('${fileData.id}', this.checked)">
+                                Done Printing
+                            </label>
+                            <button class="btn btn-grey btn-small" onclick="window.downloadOriginalFile('${fileData.id}', '${fileData.name}')">⬇️ Original PDF</button>
+                            <button class="btn btn-secondary btn-small" onclick="window.processStoredFile('${fileData.id}', '${fileData.name}', 'print')">Rearrange & Print</button>
+                            <button class="btn btn-blue btn-small" onclick="window.processStoredFile('${fileData.id}', '${fileData.name}', 'download')">Rearrange & Download</button>
+                            <button class="btn btn-red btn-small" onclick="window.deleteFileFromStorage('${fileData.id}')">Delete</button>
+                        </div>
+                    `;
+                    historyList.appendChild(item);
+                });
+            } catch (error) {
+                console.error("Error loading history:", error);
+            }
         }
 
         function calculateSummaryDashboard(files) {
@@ -591,7 +601,7 @@
 
             dashboard.style.display = 'block';
             grid.innerHTML = `
-                <div class="summary-stat">Total Cloud Files: <span>${totalBatches}</span></div>
+                <div class="summary-stat">Total Uploaded Files: <span>${totalBatches}</span></div>
                 <div class="summary-stat">Completed Prints: <span>${totalPrinted} / ${totalBatches}</span></div>
             `;
 
@@ -612,43 +622,34 @@
             
             currentActiveFileName = file.name;
             await runCoreEngine(file);
-            await saveFileToStorage(file, temporaryExtractedCompany, processedOrders); 
+            saveFileToStorage(file, temporaryExtractedCompany, processedOrders); 
         }
 
-        async function processStoredFile(id, action) {
+        window.processStoredFile = async function(id, fileName, action) {
             const statusEl = document.getElementById('status');
-            statusEl.textContent = "Fetching file from Firebase Storage...";
+            statusEl.textContent = "Fetching file from cloud storage...";
             
-            const docRef = doc(db, "pdfs", id);
-            const docSnap = await getDoc(docRef);
-
-            if(docSnap.exists()) {
-                const data = docSnap.data();
-                currentActiveFileName = data.name;
+            try {
+                const storageRef = ref(storage, 'pdfs/' + id);
+                const blob = await getBlob(storageRef);
                 
-                try {
-                    // Fetch blob directly from Firebase Storage to avoid CORS issues
-                    const storageRef = ref(storage, data.storagePath);
-                    const blob = await getBlob(storageRef);
-                    
-                    await runCoreEngine(blob);
-                    
-                    setTimeout(() => {
-                        if (action === 'print') {
-                            window.print();
-                        } else if (action === 'download') {
-                            downloadCurrentLabels();
-                        }
-                    }, 1000); 
-                } catch (error) {
-                    console.error("Error fetching file:", error);
-                    statusEl.textContent = "Error: Could not retrieve file from cloud.";
-                }
+                currentActiveFileName = fileName;
+                await runCoreEngine(blob);
+                
+                setTimeout(() => {
+                    if (action === 'print') {
+                        window.print();
+                    } else if (action === 'download') {
+                        window.downloadCurrentLabels();
+                    }
+                }, 1000); 
+            } catch (error) {
+                console.error("Error processing cloud file:", error);
+                statusEl.textContent = "Failed to retrieve file from cloud.";
             }
-        }
+        };
 
-        // --- PDF GENERATION & ENGINE CODE (UNCHANGED) ---
-        async function downloadCurrentLabels() {
+        window.downloadCurrentLabels = async function() {
             const { jsPDF } = window.jspdf;
             const canvases = document.querySelectorAll('#labels-container canvas');
             const statusEl = document.getElementById('status');
@@ -680,14 +681,18 @@
 
                 let dynamicName = currentActiveFileName.replace(/\.[^/.]+$/, "") + "_rearranged.pdf";
                 pdf.save(dynamicName);
+                
                 statusEl.textContent = "Download complete!";
             } catch (err) {
                 console.error(err);
                 statusEl.textContent = "Error generating PDF download.";
             }
-        }
+        };
 
-        async function runCoreEngine(file) {
+        // ==============================================================================
+        // --- MAIN ENGINE CODE  ---
+        // ==============================================================================
+        async function runCoreEngine(fileBlob) {
             const statusEl = document.getElementById('status');
             const container = document.getElementById('labels-container');
             container.innerHTML = '';
@@ -698,7 +703,7 @@
             document.getElementById('download-btn').disabled = true;
             
             try {
-                const arrayBuffer = await file.arrayBuffer();
+                const arrayBuffer = await fileBlob.arrayBuffer();
                 currentPdfDoc = await pdfjsLib.getDocument({ data: arrayBuffer }).promise;
                 statusEl.textContent = `Processing ${currentPdfDoc.numPages} pages...`;
                 
@@ -768,6 +773,7 @@
 
                         let skus = [];
                         let qtys = [];
+
                         const skuRegex = /\(([^)]+)\)\s*HSN/gi;
                         let skuMatch;
                         
@@ -925,17 +931,6 @@
                 ctx.fillText(textToInject, renderX, renderY);
             }
         }
-
-        // Expose UI functions to the global window so HTML buttons can trigger them
-        window.searchForOrder = searchForOrder;
-        window.togglePrintedStatus = togglePrintedStatus;
-        window.deleteFileFromStorage = deleteFileFromStorage;
-        window.downloadOriginalFile = downloadOriginalFile;
-        window.processStoredFile = processStoredFile;
-        window.downloadCurrentLabels = downloadCurrentLabels;
-
-        // Boot up
-        initDB();
     </script>
 </body>
 </html>
