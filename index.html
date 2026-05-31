@@ -294,4 +294,669 @@
         .label-card {
             background: white;
             padding: 12px;
-            border-radius:
+            border-radius: 8px;
+            box-shadow: 0 4px 12px rgba(0,0,0,0.05);
+            position: relative;
+        }
+
+        canvas {
+            border: 1px dashed #b5b5b5;
+            max-width: 100%;
+            height: auto;
+            display: block;
+        }
+
+        /* Print Media Queries */
+        @media print {
+            .no-print {
+                display: none !important;
+            }
+            body {
+                background-color: white;
+            }
+            #labels-container {
+                margin: 0;
+                padding: 0;
+                max-width: 100%;
+                display: block;
+            }
+            .label-card {
+                box-shadow: none;
+                padding: 0;
+                margin: 0;
+                page-break-after: always;
+                page-break-inside: avoid;
+            }
+            canvas {
+                border: none;
+                width: 100% !important;
+                height: auto !important;
+            }
+        }
+    </style>
+</head>
+<body>
+
+    <div class="control-panel no-print">
+        <div class="container">
+            <h2>📦 Amazon Label Sorter (Labels Only)</h2>
+            
+            <div class="file-input-wrapper">
+                <button class="btn">Select PDF File</button>
+                <input type="file" id="pdf-file" accept="application/pdf" />
+            </div>
+
+            <div class="options-group">
+                <label for="sort-strategy">Sort A-Z By:</label>
+                <select id="sort-strategy">
+                    <option value="sku">Product SKU</option>
+                    <option value="buyer">Customer Name / Order ID</option>
+                </select>
+            </div>
+
+            <button class="btn btn-secondary" id="print-btn" disabled onclick="window.print()">🖨️ Print Labels Only</button>
+            <button class="btn btn-blue" id="download-btn" disabled onclick="downloadCurrentLabels()">⬇️ Download PDF</button>
+            <div id="status">Waiting for your file...</div>
+        </div>
+    </div>
+
+    <div class="summary-dashboard no-print" id="summary-dashboard" style="display: none;">
+        <div class="summary-card">
+            <div class="summary-title">📈 Batch Printing Summary Overview</div>
+            <div class="summary-grid" id="summary-grid">
+                </div>
+        </div>
+    </div>
+
+    <div class="saved-files-panel no-print">
+        <div class="saved-files-header">
+            <span>📂 Saved File History (Local Browser Storage)</span>
+            <div class="search-box">
+                <input type="text" id="order-search-input" placeholder="🔍 Search Order ID (e.g. 405-1234567...)">
+                <button class="btn btn-blue btn-small" onclick="searchForOrder()">Locate File</button>
+            </div>
+        </div>
+        <div id="search-result"></div>
+        <div class="history-list" id="history-list">
+            </div>
+    </div>
+
+    <div id="labels-container"></div>
+
+    <script>
+        pdfjsLib.GlobalWorkerOptions.workerSrc = 'https://cdnjs.cloudflare.com/ajax/libs/pdf.js/2.16.105/pdf.worker.min.js';
+
+        // --- GLOBAL VARIABLES ---
+        let processedOrders = [];
+        let currentPdfDoc = null;
+        let db; // IndexedDB Database reference
+        let temporaryExtractedCompany = "Unknown Seller";
+        let currentActiveFileName = "Amazon_Labels.pdf"; // Tracks the filename for downloading
+
+        // --- EVENT LISTENERS ---
+        document.getElementById('pdf-file').addEventListener('change', handleNewUpload);
+        document.getElementById('sort-strategy').addEventListener('change', renderSortedLabels);
+        
+        // Add Enter key support for search
+        document.getElementById('order-search-input').addEventListener('keypress', function(e) {
+            if (e.key === 'Enter') searchForOrder();
+        });
+
+        // --- INDEXEDDB SETUP FOR LOCAL STORAGE ---
+        function initDB() {
+            const request = indexedDB.open('AmazonLabelDB', 3); // Incremented version for new structure
+            
+            request.onupgradeneeded = (event) => {
+                db = event.target.result;
+                if (!db.objectStoreNames.contains('pdfs')) {
+                    db.createObjectStore('pdfs', { keyPath: 'id' });
+                }
+            };
+
+            request.onsuccess = (event) => {
+                db = event.target.result;
+                loadHistoryUI();
+            };
+
+            request.onerror = (event) => {
+                console.error('IndexedDB error:', event.target.error);
+            };
+        }
+
+        // Updated to save the array of processed order IDs so we can search them later
+        function saveFileToStorage(file, companyName = "Unknown Seller", processedDataArray = []) {
+            const transaction = db.transaction(['pdfs'], 'readwrite');
+            const store = transaction.objectStore('pdfs');
+            
+            const fileData = {
+                id: Date.now(),
+                name: file.name,
+                blob: file,
+                companyName: companyName,
+                isPrinted: false,
+                date: new Date().toLocaleString(),
+                extractedOrderIds: processedDataArray.map(o => o.orderId).filter(id => id !== "Unknown")
+            };
+
+            store.add(fileData);
+            transaction.oncomplete = () => loadHistoryUI();
+        }
+
+        function togglePrintedStatus(id, isChecked) {
+            const transaction = db.transaction(['pdfs'], 'readwrite');
+            const store = transaction.objectStore('pdfs');
+            const request = store.get(id);
+
+            request.onsuccess = () => {
+                const data = request.result;
+                if (data) {
+                    data.isPrinted = isChecked;
+                    store.put(data);
+                }
+            };
+            
+            transaction.oncomplete = () => {
+                loadHistoryUI();
+            };
+        }
+
+        function deleteFileFromStorage(id) {
+            const transaction = db.transaction(['pdfs'], 'readwrite');
+            const store = transaction.objectStore('pdfs');
+            store.delete(id);
+            transaction.oncomplete = () => loadHistoryUI();
+        }
+
+        // --- NEW FEATURE: Download Original File ---
+        function downloadOriginalFile(id) {
+            const transaction = db.transaction(['pdfs'], 'readonly');
+            const store = transaction.objectStore('pdfs');
+            const request = store.get(id);
+
+            request.onsuccess = () => {
+                const fileData = request.result;
+                if (!fileData || !fileData.blob) return;
+                
+                const url = URL.createObjectURL(fileData.blob);
+                const a = document.createElement('a');
+                a.href = url;
+                a.download = fileData.name;
+                document.body.appendChild(a);
+                a.click();
+                document.body.removeChild(a);
+                URL.revokeObjectURL(url);
+            };
+        }
+
+        // --- NEW FEATURE: Search Order ID ---
+        function searchForOrder() {
+            const query = document.getElementById('order-search-input').value.trim();
+            const resultEl = document.getElementById('search-result');
+            
+            if(!query) { 
+                resultEl.innerHTML = ""; 
+                return; 
+            }
+            
+            const transaction = db.transaction(['pdfs'], 'readonly');
+            const store = transaction.objectStore('pdfs');
+            const request = store.getAll();
+            
+            request.onsuccess = () => {
+                const files = request.result;
+                let foundFiles = [];
+                
+                files.forEach(f => {
+                    // Check if the orderId exists in the stored array for this file
+                    if(f.extractedOrderIds && f.extractedOrderIds.includes(query)) {
+                        foundFiles.push(f.name);
+                    }
+                });
+                
+                if(foundFiles.length > 0) {
+                    resultEl.style.color = "#28a745"; // Green success
+                    resultEl.innerHTML = `✅ Found in: <strong>${foundFiles.join(', ')}</strong>. You can hit 'Rearrange & Print' on that file below.`;
+                } else {
+                    resultEl.style.color = "#dc3545"; // Red error
+                    resultEl.innerHTML = `❌ Order ID not found. Ensure you typed it correctly or that the file was uploaded recently.`;
+                }
+            };
+        }
+
+        function loadHistoryUI() {
+            const transaction = db.transaction(['pdfs'], 'readonly');
+            const store = transaction.objectStore('pdfs');
+            const request = store.getAll();
+
+            request.onsuccess = () => {
+                const historyList = document.getElementById('history-list');
+                historyList.innerHTML = '';
+                
+                const files = request.result.reverse(); 
+
+                if (files.length === 0) {
+                    historyList.innerHTML = '<div style="font-size: 14px; color: #777;">No previous files saved.</div>';
+                    document.getElementById('summary-dashboard').style.display = 'none';
+                    return;
+                }
+
+                calculateSummaryDashboard(files);
+
+                files.forEach(fileData => {
+                    const item = document.createElement('div');
+                    item.className = `history-item ${fileData.isPrinted ? 'printed-row' : ''}`;
+                    
+                    const displayCompany = fileData.companyName || "Unknown Seller";
+                    const checkedAttribute = fileData.isPrinted ? "checked" : "";
+
+                    item.innerHTML = `
+                        <div class="history-info">
+                            <span class="history-name">${fileData.name}</span>
+                            <div class="history-meta-row">
+                                <span class="company-badge">🏢 ${displayCompany}</span>
+                                <span class="history-date">${fileData.date}</span>
+                            </div>
+                        </div>
+                        <div class="history-actions">
+                            <label class="print-status-wrapper">
+                                <input type="checkbox" ${checkedAttribute} onchange="togglePrintedStatus(${fileData.id}, this.checked)">
+                                Done Printing
+                            </label>
+                            <button class="btn btn-grey btn-small" onclick="downloadOriginalFile(${fileData.id})">⬇️ Original PDF</button>
+                            <button class="btn btn-secondary btn-small" onclick="processStoredFile(${fileData.id}, 'print')">Rearrange & Print</button>
+                            <button class="btn btn-blue btn-small" onclick="processStoredFile(${fileData.id}, 'download')">Rearrange & Download</button>
+                            <button class="btn btn-red btn-small" onclick="deleteFileFromStorage(${fileData.id})">Delete</button>
+                        </div>
+                    `;
+                    historyList.appendChild(item);
+                });
+            };
+        }
+
+        function calculateSummaryDashboard(files) {
+            const dashboard = document.getElementById('summary-dashboard');
+            const grid = document.getElementById('summary-grid');
+            
+            let totalBatches = files.length;
+            let totalPrinted = files.filter(f => f.isPrinted).length;
+            
+            let companyCounts = {};
+            files.forEach(f => {
+                let comp = f.companyName || "Unknown Seller";
+                if(!companyCounts[comp]) {
+                    companyCounts[comp] = { total: 0, printed: 0, pending: 0 };
+                }
+                companyCounts[comp].total++;
+                if(f.isPrinted) {
+                    companyCounts[comp].printed++;
+                } else {
+                    companyCounts[comp].pending++;
+                }
+            });
+
+            dashboard.style.display = 'block';
+            grid.innerHTML = `
+                <div class="summary-stat">Total Uploaded Files: <span>${totalBatches}</span></div>
+                <div class="summary-stat">Completed Prints: <span>${totalPrinted} / ${totalBatches}</span></div>
+            `;
+
+            Object.keys(companyCounts).forEach(company => {
+                const stats = companyCounts[company];
+                const cleanBlock = document.createElement('div');
+                cleanBlock.className = "summary-stat";
+                cleanBlock.style.borderLeft = "2px solid #ccc";
+                cleanBlock.style.paddingLeft = "10px";
+                cleanBlock.innerHTML = `${company}: <span>${stats.total} total</span> | <span style="color: #28a745;">${stats.printed} printed</span> | <span style="color: #dc3545;">${stats.pending} pending</span>`;
+                grid.appendChild(cleanBlock);
+            });
+        }
+
+        async function handleNewUpload(e) {
+            const file = e.target.files[0];
+            if (!file) return;
+            
+            // Set global filename tracker
+            currentActiveFileName = file.name;
+            
+            await runCoreEngine(file);
+            // Pass the extracted processedOrders so it saves Order IDs to the DB
+            saveFileToStorage(file, temporaryExtractedCompany, processedOrders); 
+        }
+
+        function processStoredFile(id, action) {
+            const transaction = db.transaction(['pdfs'], 'readonly');
+            const store = transaction.objectStore('pdfs');
+            const request = store.get(id);
+
+            request.onsuccess = async () => {
+                const fileData = request.result;
+                if (!fileData) return;
+                
+                // Set global filename tracker
+                currentActiveFileName = fileData.name;
+                
+                await runCoreEngine(fileData.blob);
+                
+                setTimeout(() => {
+                    if (action === 'print') {
+                        window.print();
+                    } else if (action === 'download') {
+                        downloadCurrentLabels();
+                    }
+                }, 1000); 
+            };
+        }
+
+        // --- NEW FEATURE: Dynamic Filenames ---
+        async function downloadCurrentLabels() {
+            const { jsPDF } = window.jspdf;
+            const canvases = document.querySelectorAll('#labels-container canvas');
+            const statusEl = document.getElementById('status');
+            
+            if (canvases.length === 0) {
+                alert("No labels generated to download!");
+                return;
+            }
+
+            statusEl.textContent = "Generating PDF for download... Please wait.";
+
+            try {
+                const firstCanvas = canvases[0];
+                const width = firstCanvas.width;
+                const height = firstCanvas.height;
+                
+                const pdf = new jsPDF({
+                    orientation: width > height ? 'landscape' : 'portrait',
+                    unit: 'px',
+                    format: [width, height]
+                });
+
+                for (let i = 0; i < canvases.length; i++) {
+                    if (i > 0) pdf.addPage([canvases[i].width, canvases[i].height]);
+                    
+                    const imgData = canvases[i].toDataURL('image/jpeg', 1.0);
+                    pdf.addImage(imgData, 'JPEG', 0, 0, canvases[i].width, canvases[i].height);
+                }
+
+                // Remove .pdf extension and add _rearranged.pdf
+                let dynamicName = currentActiveFileName.replace(/\.[^/.]+$/, "") + "_rearranged.pdf";
+                pdf.save(dynamicName);
+                
+                statusEl.textContent = "Download complete!";
+            } catch (err) {
+                console.error(err);
+                statusEl.textContent = "Error generating PDF download.";
+            }
+        }
+
+        // ==============================================================================
+        // --- MAIN ENGINE CODE (UPDATED FOR DYNAMIC MULTI-PAGE INVOICE MAPPING) ---
+        // ==============================================================================
+        async function runCoreEngine(file) {
+            const statusEl = document.getElementById('status');
+            const container = document.getElementById('labels-container');
+            container.innerHTML = '';
+            statusEl.textContent = "Analyzing PDF structure and linking images to text...";
+            
+            temporaryExtractedCompany = "Unknown Seller";
+            document.getElementById('print-btn').disabled = true;
+            document.getElementById('download-btn').disabled = true;
+            
+            try {
+                const arrayBuffer = await file.arrayBuffer();
+                currentPdfDoc = await pdfjsLib.getDocument({ data: arrayBuffer }).promise;
+                statusEl.textContent = `Processing ${currentPdfDoc.numPages} pages...`;
+                
+                processedOrders = [];
+                let groupedOrders = [];
+                let currentGroup = { labelPageNum: null, labelTextData: null, invoicePages: [] };
+
+                // 1. Sequentially group pages (1 Image Label -> N Text Invoices)
+                for (let i = 1; i <= currentPdfDoc.numPages; i++) {
+                    const page = await currentPdfDoc.getPage(i);
+                    const textData = await extractTextAndPositions(page);
+                    
+                    // Identify invoices based on text volume and key Amazon phrases
+                    const isInvoice = /Sold By|Tax Invoice|HSN|Invoice Number/i.test(textData.text) || textData.text.length > 150;
+
+                    if (!isInvoice) {
+                        if (currentGroup.labelPageNum !== null) {
+                            groupedOrders.push(currentGroup);
+                        }
+                        currentGroup = { labelPageNum: i, labelTextData: textData, invoicePages: [] };
+                    } else {
+                        currentGroup.invoicePages.push({ pageNum: i, textData: textData });
+                    }
+                }
+                
+                if (currentGroup.labelPageNum !== null || currentGroup.invoicePages.length > 0) {
+                    groupedOrders.push(currentGroup);
+                }
+
+                // 2. Extract Data from the Clickable Invoices and link to the Image Label
+                for (const group of groupedOrders) {
+                    if (group.labelPageNum === null) continue;
+
+                    let buyerName = "Unknown";
+                    let sku = "UNKNOWN";
+                    let qty = "1";
+                    let atsplTargetToken = null;
+                    let orderId = "Unknown";
+
+                    if (group.labelTextData && group.labelTextData.text.length > 0) {
+                        const buyerMatch = group.labelTextData.text.match(/Ship To:\s*([^\n\r]+)/i);
+                        if (buyerMatch) buyerName = buyerMatch[1].trim();
+                        atsplTargetToken = group.labelTextData.items.find(item => item.str.includes("ATSPL"));
+                    }
+
+                    let combinedInvoiceText = "";
+                    for (const inv of group.invoicePages) {
+                        combinedInvoiceText += inv.textData.text + " \n ";
+                    }
+
+                    if (combinedInvoiceText) {
+                        const companyMatch = combinedInvoiceText.match(/Sold By\s*:\s*([^\n\r]+)/i);
+                        if (companyMatch && temporaryExtractedCompany === "Unknown Seller") {
+                            temporaryExtractedCompany = companyMatch[1].trim();
+                        }
+
+                        const orderIdMatch = combinedInvoiceText.match(/\d{3}-\d{7}-\d{7}/);
+                        if (orderIdMatch) {
+                            orderId = orderIdMatch[0];
+                        }
+
+                        if (buyerName === "Unknown") {
+                            const billingMatch = combinedInvoiceText.match(/(?:Billing Address|Shipping Address)\s*:\s*([^\n\r]+)/i);
+                            if (billingMatch) {
+                                buyerName = billingMatch[1].trim();
+                            } else {
+                                buyerName = `Order ID: ${orderId}`;
+                            }
+                        }
+
+                        // --- CHUNKING EXTRACTION USING INDIAN RUPEE (₹) PATTERN ---
+                        let skus = [];
+                        let qtys = [];
+
+                        const skuRegex = /\(([^)]+)\)\s*HSN/gi;
+                        let skuMatch;
+                        
+                        while ((skuMatch = skuRegex.exec(combinedInvoiceText)) !== null) {
+                            skus.push(skuMatch[1].replace(/^\s+|\s+$/g, ''));
+                            let textChunk = combinedInvoiceText.substring(skuRegex.lastIndex, skuRegex.lastIndex + 250);
+                            
+                            let rupeeQtyMatch = textChunk.match(/₹\s*[\d,.]+\s+(?:-?₹\s*[\d,.]+\s+)?(\d{1,4})\s+₹/);
+                            
+                            if (rupeeQtyMatch) {
+                                qtys.push(rupeeQtyMatch[1].trim());
+                            } else {
+                                let chunkQtyMatch = textChunk.match(/(?:\n|\s|^)["']?(\d{1,4})["']?\s*\n\s*["']?\d+\.\d{2}["']?\s*\n\s*["']?\d+\.?\d*%\s*["']?/i);
+                                if (chunkQtyMatch) {
+                                    qtys.push(chunkQtyMatch[1].trim());
+                                } else {
+                                    let csvMatch = textChunk.match(/,\s*["'](\d{1,4})["']\s*,\s*["']\d+\.\d+["']/);
+                                    if (csvMatch) {
+                                        qtys.push(csvMatch[1].trim());
+                                    } else {
+                                        qtys.push("1"); 
+                                    }
+                                }
+                            }
+                        }
+
+                        if (skus.length === 0) {
+                            const fallbackMatch = combinedInvoiceText.match(/(MASSAGER|HAIR TRIMMER|SPORTING GOODS|WATER DISPENSER)/i);
+                            if (fallbackMatch) {
+                                skus.push(fallbackMatch[1].trim());
+                                
+                                let generalRupeeMatch = combinedInvoiceText.match(/₹\s*[\d,.]+\s+(?:-?₹\s*[\d,.]+\s+)?(\d{1,4})\s+₹/);
+                                if (generalRupeeMatch) {
+                                    qtys.push(generalRupeeMatch[1].trim());
+                                } else {
+                                    let generalQty = combinedInvoiceText.match(/(?:\n|\s|^)["']?(\d{1,4})["']?\s*\n\s*["']?\d+\.\d{2}["']?\s*\n\s*["']?\d+\.?\d*%\s*["']?/i);
+                                    qtys.push(generalQty ? generalQty[1].trim() : "1");
+                                }
+                            }
+                        }
+
+                        let finalSkuString = "UNKNOWN";
+                        let totalQty = 1;
+
+                        if (skus.length > 0) {
+                            let itemBreakdowns = [];
+                            totalQty = 0;
+                            
+                            for (let i = 0; i < skus.length; i++) {
+                                let q = qtys[i] || "1"; 
+                                itemBreakdowns.push(`${skus[i]} (Qty: ${q})`);
+                                totalQty += parseInt(q, 10) || 1;
+                            }
+                            
+                            finalSkuString = itemBreakdowns.join(" | "); 
+                        }
+
+                        sku = finalSkuString;
+                        qty = totalQty.toString();
+                    }
+
+                    processedOrders.push({
+                        labelPageNum: group.labelPageNum,
+                        buyerName: buyerName,
+                        sku: sku,
+                        qty: qty,
+                        atsplToken: atsplTargetToken,
+                        orderId: orderId
+                    });
+                }
+
+                statusEl.textContent = `Completed! Mapped and sorted ${processedOrders.length} image labels.`;
+                document.getElementById('print-btn').disabled = false;
+                document.getElementById('download-btn').disabled = false;
+                
+                await renderSortedLabels();
+
+            } catch (err) {
+                console.error(err);
+                statusEl.textContent = "Error parsing file format.";
+            }
+        }
+
+        async function extractTextAndPositions(page) {
+            const textContent = await page.getTextContent();
+            let text = "";
+            textContent.items.forEach(item => {
+                text += item.str + " \n ";
+            });
+            return { text, items: textContent.items };
+        }
+
+        async function renderSortedLabels() {
+            if (!currentPdfDoc || processedOrders.length === 0) return;
+
+            const strategy = document.getElementById('sort-strategy').value;
+            const container = document.getElementById('labels-container');
+            container.innerHTML = '<p class="no-print">Arranging and sorting templates...</p>';
+
+            const sorted = [...processedOrders].sort((a, b) => {
+                let valA = strategy === 'sku' ? a.sku : a.buyerName;
+                let valB = strategy === 'sku' ? b.sku : b.buyerName;
+                return valA.localeCompare(valB, undefined, { sensitivity: 'base', numeric: true });
+            });
+
+            container.innerHTML = '';
+
+            for (const order of sorted) {
+                const card = document.createElement('div');
+                card.className = 'label-card';
+                
+                const canvas = document.createElement('canvas');
+                card.appendChild(canvas);
+                container.appendChild(card);
+
+                const page = await currentPdfDoc.getPage(order.labelPageNum);
+                
+                const scale = 2.5; 
+                const viewport = page.getViewport({ scale });
+                const ctx = canvas.getContext('2d');
+                
+                canvas.width = viewport.width;
+                canvas.height = viewport.height;
+
+                await page.render({ canvasContext: ctx, viewport: viewport }).promise;
+
+                let renderX, renderY;
+
+                if (order.atsplToken) {
+                    const [cx, cy] = viewport.convertToViewportPoint(order.atsplToken.transform[4], order.atsplToken.transform[5]);
+                    renderX = cx;
+                    renderY = cy - (16 * scale); 
+                } else {
+                    renderX = canvas.width * 0.06;
+                    renderY = canvas.height * 0.81;
+                }
+
+                const textToInject = `TOTAL QTY: ${order.qty}  |  ${order.sku}`;
+
+                let fontSize = 14;
+                if (textToInject.length > 40) fontSize = 11;
+                if (textToInject.length > 60) fontSize = 9;
+
+                ctx.fillStyle = "black";
+                ctx.font = `bold ${fontSize * scale}px Arial`;
+                                
+                ctx.fillStyle = "white";
+                const metrics = ctx.measureText(textToInject);
+
+                const boxPadding = 12;
+                const boxHeight = (fontSize + 3) * scale;
+                ctx.fillRect(renderX - 4, renderY - (fontSize * scale), metrics.width + boxPadding, boxHeight);
+                                
+                ctx.fillStyle = "black";
+                ctx.fillText(textToInject, renderX, renderY);
+            }
+        }
+
+        initDB();
+    </script>
+    
+    <script type="module">
+      // Import the functions you need from the SDKs you need
+      import { initializeApp } from "https://www.gstatic.com/firebasejs/12.14.0/firebase-app.js";
+      // TODO: Add SDKs for Firebase products that you want to use
+      // https://firebase.google.com/docs/web/setup#available-libraries
+
+      // Your web app's Firebase configuration
+      const firebaseConfig = {
+        apiKey: "AIzaSyDn1TaEeXbCEDjXAusqZ5R1i5H7oBqwCSM",
+        authDomain: "shipping-label-b9560.firebaseapp.com",
+        projectId: "shipping-label-b9560",
+        storageBucket: "shipping-label-b9560.firebasestorage.app",
+        messagingSenderId: "93789744815",
+        appId: "1:93789744815:web:19e4818bf002c24c73ae5a"
+      };
+
+      // Initialize Firebase
+      const app = initializeApp(firebaseConfig);
+    </script>
+</body>
+</html>
